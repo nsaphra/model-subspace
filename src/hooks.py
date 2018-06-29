@@ -20,7 +20,7 @@ class AnalysisHook:
 
     def save_activations_hook(self, module, input, output):
         for idx, activation in enumerate(output):
-            activation = self.process_activation(activation)
+            activation = self.process_activations(activation)
             if activation is None:
                 continue
 
@@ -29,24 +29,39 @@ class AnalysisHook:
 
             np.save(self.layer_files[idx], activation.cpu().numpy())
 
-    def process_activation(self, activation):
-        if activation is None:
+    def process_activations(self, activations):
+        def matches_sequence_length(d1, d2):
+            return d1 * d2 == self.analyzer.sequence.size(0)
+
+        def should_collapse_tuple(length, first_elt):
+            if matches_sequence_length(first_elt.size(0), length):
+                return True
+            return first_elt.size(0) == 1 and matches_sequence_length(first_elt.size(1), length)
+
+        if type(activations) is tuple:
+            if type(activations[0]) is torch.cuda.FloatTensor and should_collapse_tuple(len(activations), activations[0]):
+                activations = torch.stack(activations, dim=0)
+            else:
+                for output in activations:
+                    activations = self.process_activations(output)
+                    if activations is not None:
+                        break # use the first output that has the correct dimensions
+
+        if type(activations) is not Variable or type(activations.data) is not torch.cuda.FloatTensor:
             return None
 
-        if type(activation) is tuple:
-            activation = torch.stack(activation, dim=0)
+        if activations.dim() == 3:
+            if matches_sequence_length(activations.size(0), activations.size(1)):
+                # activations: sequence_length x batch_size x hidden_size
+                activations = activations.view(self.analyzer.sequence.size(0), -1)
+            else:
+                return None
 
-        if type(activation.data) is not torch.cuda.FloatTensor:
+        if activations.size(0) != self.analyzer.sequence.size(0):
             return None
+        # activations: (sequence_length * batch_size) x hidden_size
 
-        if activation.dim() == 3 and (activation.size(0) * activation.size(1)) == (self.analyzer.sequence.size(0)):
-            # activation: sequence_length x batch_size x hidden_size
-            activation = activation.view(self.analyzer.sequence.size(0), -1)
-        elif activation.size(0) != self.analyzer.sequence.size(0):
-            return None
-        # activation: (sequence_length * batch_size) x hidden_size
-
-        return activation.data
+        return activations.data
 
     def register_hook(self, module):
         self.handle = module.register_forward_hook(self.save_activations_hook)
@@ -81,8 +96,12 @@ class NetworkSubspaceConstructor:
             output_size = parameter.size(-1)
         return output_size
 
-    def set_word_sequence(self, targets):
-        self.sequence = targets.data.view(-1)
+    def set_word_sequence(self, module, input, output):
+        self.sequence = input[0][:,0].cpu().data
+
+    def add_hooks_to_model(self):
+        self.model._modules['encoder'].register_forward_hook(self.set_word_sequence)
+        self.add_hooks_recursively(self.model)
 
     def add_hooks_recursively(self, parent_module: nn.Module, prefix=''):
         # add hooks to the modules in a network recursively
@@ -95,9 +114,6 @@ class NetworkSubspaceConstructor:
 
             self.hooks[module_key].register_hook(module)
             self.add_hooks_recursively(module, prefix=module_key)
-
-    def add_hooks_to_model(self):
-        self.add_hooks_recursively(self.model)
 
     def remove_hooks(self):
         for key, hook in self.hooks.items():

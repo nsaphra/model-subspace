@@ -34,7 +34,7 @@ parser.add_argument('--original-src', type=str,
                     help='location of the modules required for the model')
 parser.add_argument('--bptt', type=int, default=35,
                     help='sequence length')
-parser.add_argument('--batch-size', type=int, default=60)
+parser.add_argument('--batch-size', type=int, default=20)
 parser.add_argument('--test-length', type=int, default=None,
                     help='number of lines to test in the test corpus')
 parser.add_argument('--save-dir', type=str)
@@ -100,8 +100,6 @@ criterion = nn.CrossEntropyLoss()
 # Run on test data.
 print("test data size ", test_data.size())
 
-constructor = hooks.NetworkSubspaceConstructor(model, args.save_dir)
-
 def evaluate(data_source):
     ntokens = len(corpus.dictionary)
     start_time = time.time()
@@ -110,8 +108,6 @@ def evaluate(data_source):
     total_loss = 0
     for batch,i in enumerate(range(0, data_source.size(0) - 1, args.bptt)):
         data, targets = get_batch(data_source, i)
-
-        constructor.set_word_sequence(targets)
 
         output, hidden = model(data, hidden)
         output_flat = output.view(-1, ntokens)
@@ -125,6 +121,7 @@ def evaluate(data_source):
 
     return total_loss.data[0] / num_batches
 
+constructor = hooks.NetworkSubspaceConstructor(model, args.save_dir)
 constructor.add_hooks_to_model()
 test_loss = evaluate(test_data)
 constructor.remove_hooks()
